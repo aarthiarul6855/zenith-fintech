@@ -11,7 +11,6 @@ router = APIRouter(prefix="/transactions", tags=["Transactions"])
 
 
 @router.post("/", response_model=TransactionOut, status_code=201)
-@router.post("/", response_model=TransactionOut, status_code=201)
 def create_transaction(
     payload: TransactionCreate,
     db: Session = Depends(get_db),
@@ -49,6 +48,31 @@ def list_transactions(
     if type:
         q = q.filter(Transaction.type == type)
     return q.order_by(Transaction.date.desc()).offset(offset).limit(limit).all()
+
+
+@router.put("/{transaction_id}", response_model=TransactionOut)
+def update_transaction(
+    transaction_id: int,
+    payload: TransactionCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    t = db.query(Transaction).filter(
+        Transaction.id == transaction_id, Transaction.user_id == user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+
+    data = payload.model_dump()
+    # Re-categorize from the (possibly updated) description.
+    if data.get("description"):
+        data["category"] = transaction_categorizer.classify(data["description"])["category"]
+
+    for key, value in data.items():
+        setattr(t, key, value)
+    db.commit()
+    db.refresh(t)
+    return t
 
 
 @router.delete("/{transaction_id}", status_code=204)

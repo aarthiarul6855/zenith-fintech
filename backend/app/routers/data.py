@@ -26,6 +26,18 @@ def list_loans(db: Session = Depends(get_db), user: User = Depends(get_current_u
     return db.query(Loan).filter(Loan.user_id == user.id).all()
 
 
+@loans_router.put("/{loan_id}", response_model=LoanOut)
+def update_loan(loan_id: int, payload: LoanCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    loan = db.query(Loan).filter(Loan.id == loan_id, Loan.user_id == user.id).first()
+    if not loan:
+        raise HTTPException(404, "Loan not found.")
+    for key, value in payload.model_dump().items():
+        setattr(loan, key, value)
+    db.commit()
+    db.refresh(loan)
+    return loan
+
+
 @loans_router.delete("/{loan_id}", status_code=204)
 def delete_loan(loan_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     loan = db.query(Loan).filter(Loan.id == loan_id, Loan.user_id == user.id).first()

@@ -7,21 +7,44 @@ import {
 
 const API = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
+// Flattens FastAPI validation errors (which can be arrays of objects) into a readable string.
+const parseErr = (e) => {
+  if (!e) return "Something went wrong.";
+  if (typeof e === "string") return e;
+  const d = e.detail ?? e;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) return d.map(x => x?.msg || x?.message || (typeof x === "string" ? x : JSON.stringify(x))).join(", ");
+  return d?.msg || d?.message || "Something went wrong.";
+};
+
+const handle = async (r) => {
+  if (r.status === 401) {
+    // Token missing/expired → notify app shell to log out.
+    window.dispatchEvent(new CustomEvent("zf-unauthorized"));
+    const err = new Error("Session expired. Please sign in again.");
+    err.detail = "Session expired. Please sign in again.";
+    throw err;
+  }
+  if (!r.ok && r.status !== 204) throw await r.json().catch(() => ({ detail: `Request failed (${r.status})` }));
+  return r;
+};
+
 const api = {
   headers: (token) => ({ "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }),
   post: async (path, body, token) => {
-    const r = await fetch(`${API}${path}`, { method: "POST", headers: api.headers(token), body: JSON.stringify(body) });
-    if (!r.ok) throw await r.json();
+    const r = await handle(await fetch(`${API}${path}`, { method: "POST", headers: api.headers(token), body: JSON.stringify(body) }));
+    return r.json();
+  },
+  put: async (path, body, token) => {
+    const r = await handle(await fetch(`${API}${path}`, { method: "PUT", headers: api.headers(token), body: JSON.stringify(body) }));
     return r.json();
   },
   get: async (path, token) => {
-    const r = await fetch(`${API}${path}`, { headers: api.headers(token) });
-    if (!r.ok) throw await r.json();
+    const r = await handle(await fetch(`${API}${path}`, { headers: api.headers(token) }));
     return r.json();
   },
   del: async (path, token) => {
-    const r = await fetch(`${API}${path}`, { method: "DELETE", headers: api.headers(token) });
-    if (!r.ok && r.status !== 204) throw await r.json();
+    await handle(await fetch(`${API}${path}`, { method: "DELETE", headers: api.headers(token) }));
     return true;
   },
 };
@@ -33,11 +56,18 @@ const styles = `
   @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --ink: #0a0a0f; --paper: #f5f4ef; --accent: #c8f03a; --muted: #8b8a84;
+    --ink: #0a0a0f; --fg: #0a0a0f; --paper: #f5f4ef; --accent: #c8f03a; --muted: #8b8a84;
     --surface: #ffffff; --border: #e2e1db; --danger: #ff4d4d; --good: #22c55e;
     --warn: #f59e0b; --card-shadow: 0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.04);
+    --field-focus: #ffffff;
   }
-  body { font-family: 'DM Mono', monospace; background: var(--paper); color: var(--ink); min-height: 100vh; }
+  :root[data-theme="dark"] {
+    --ink: #11111a; --fg: #e8e8ef; --paper: #0b0b11; --accent: #c8f03a; --muted: #85858f;
+    --surface: #17171f; --border: #2a2a34; --danger: #ff6b6b; --good: #34d058;
+    --warn: #fbbf24; --card-shadow: 0 1px 3px rgba(0,0,0,.5), 0 4px 18px rgba(0,0,0,.4);
+    --field-focus: #1d1d26;
+  }
+  body { font-family: 'DM Mono', monospace; background: var(--paper); color: var(--fg); min-height: 100vh; transition: background .25s, color .25s; }
   h1,h2,h3,h4 { font-family: 'Syne', sans-serif; }
 
   .auth-wrap { min-height: 100vh; display: grid; place-items: center; background: var(--ink); }
@@ -47,18 +77,19 @@ const styles = `
   .auth-sub { color: var(--muted); font-size: 12px; margin-bottom: 32px; }
   .auth-tab { display: flex; gap: 4px; margin-bottom: 28px; border-bottom: 2px solid var(--border); }
   .auth-tab button { flex: 1; padding: 10px; background: none; border: none; font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700; color: var(--muted); cursor: pointer; padding-bottom: 12px; margin-bottom: -2px; border-bottom: 2px solid transparent; transition: all .2s; text-transform: uppercase; letter-spacing: .05em; }
-  .auth-tab button.active { color: var(--ink); border-bottom-color: var(--accent); }
+  .auth-tab button.active { color: var(--fg); border-bottom-color: var(--accent); }
   .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
   .field label { font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
-  .field input, .field select { padding: 10px 14px; border: 1.5px solid var(--border); border-radius: 4px; font-family: 'DM Mono', monospace; font-size: 13px; outline: none; transition: border-color .2s; background: var(--paper); width: 100%; color: var(--ink); }
-  .field input:focus, .field select:focus { border-color: var(--ink); background: #fff; }
+  .field input, .field select { padding: 10px 14px; border: 1.5px solid var(--border); border-radius: 4px; font-family: 'DM Mono', monospace; font-size: 13px; outline: none; transition: border-color .2s; background: var(--paper); width: 100%; color: var(--fg); }
+  .field input:focus, .field select:focus { border-color: var(--fg); background: var(--field-focus); }
+  .field input::placeholder { color: var(--muted); opacity: .6; }
   .btn-primary { width: 100%; padding: 13px; background: var(--ink); color: var(--accent); border: none; border-radius: 4px; font-family: 'Syne', sans-serif; font-weight: 700; font-size: 14px; cursor: pointer; transition: opacity .15s; }
   .btn-primary:hover { opacity: .85; }
   .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
   .err-msg { background: #fff0f0; color: var(--danger); padding: 10px 14px; border-radius: 4px; font-size: 12px; margin-bottom: 14px; border-left: 3px solid var(--danger); }
 
   .shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
-  .sidebar { background: var(--ink); color: var(--paper); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+  .sidebar { background: var(--ink); color: #ededed; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; z-index: 50; }
   .sidebar-logo { font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 800; letter-spacing: -0.5px; padding: 24px 20px 20px; border-bottom: 1px solid rgba(255,255,255,.07); }
   .sidebar-logo span { color: var(--accent); }
   .nav { flex: 1; padding: 12px 10px; display: flex; flex-direction: column; gap: 1px; }
@@ -143,9 +174,124 @@ const styles = `
   .stat-row:last-child { border-bottom: none; }
   .stat-label { color: var(--muted); font-size: 11px; }
   .stat-value { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 14px; }
+
+  /* ── Theme toggle + sidebar controls ── */
+  .theme-toggle { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: rgba(255,255,255,.7); cursor: pointer; font-size: 13px; padding: 7px 10px; border-radius: 6px; width: 100%; display: flex; align-items: center; gap: 8px; font-family: 'DM Mono', monospace; transition: all .15s; margin-bottom: 10px; }
+  .theme-toggle:hover { background: rgba(255,255,255,.12); color: #fff; }
+
+  /* ── Mobile top bar + hamburger ── */
+  .mobile-bar { display: none; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--ink); color: #ededed; position: sticky; top: 0; z-index: 60; }
+  .mobile-bar .m-logo { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 16px; }
+  .mobile-bar .m-logo span { color: var(--accent); }
+  .hamburger { background: none; border: none; color: #ededed; font-size: 22px; cursor: pointer; line-height: 1; padding: 4px 8px; }
+  .scrim { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 40; animation: fadeIn .2s; }
+  @keyframes fadeIn { from { opacity: 0; } }
+
+  /* ── Skeleton loaders ── */
+  .skel { background: linear-gradient(90deg, var(--border) 25%, rgba(140,138,132,.12) 50%, var(--border) 75%); background-size: 200% 100%; animation: shimmer 1.3s infinite; border-radius: 4px; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  .skel-line { height: 12px; margin: 6px 0; }
+  .skel-value { height: 26px; width: 70%; margin-top: 6px; }
+
+  /* ── Modal ── */
+  .modal-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: grid; place-items: center; z-index: 200; animation: fadeIn .2s; padding: 20px; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; width: 420px; max-width: 100%; box-shadow: 0 12px 48px rgba(0,0,0,.3); animation: slideUp .2s ease; }
+  .modal-title { font-family: 'Syne', sans-serif; font-weight: 800; font-size: 17px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+  .modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 18px; }
+  .btn-ghost { flex: 1; padding: 11px; background: transparent; border: 1.5px solid var(--border); border-radius: 4px; font-family: 'Syne', sans-serif; font-weight: 700; font-size: 13px; color: var(--fg); cursor: pointer; }
+  .btn-ghost:hover { border-color: var(--fg); }
+  .btn-solid { flex: 1; padding: 11px; background: var(--ink); color: var(--accent); border: none; border-radius: 4px; font-family: 'Syne', sans-serif; font-weight: 700; font-size: 13px; cursor: pointer; }
+  .btn-edit { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 4px; transition: color .15s; }
+  .btn-edit:hover { color: var(--accent); }
+
+  /* ── Search / filter bar ── */
+  .filter-bar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .search-input { flex: 1; min-width: 180px; padding: 9px 14px; border: 1.5px solid var(--border); border-radius: 6px; background: var(--paper); color: var(--fg); font-family: 'DM Mono', monospace; font-size: 12px; outline: none; }
+  .search-input:focus { border-color: var(--fg); }
+  .chip-group { display: flex; gap: 6px; }
+  .chip { padding: 8px 14px; border: 1.5px solid var(--border); border-radius: 6px; background: transparent; color: var(--muted); font-family: 'DM Mono', monospace; font-size: 11px; cursor: pointer; transition: all .15s; }
+  .chip.active { background: var(--ink); color: var(--accent); border-color: var(--ink); }
+
+  /* ── Confetti ── */
+  .confetti { position: fixed; top: -12px; width: 9px; height: 9px; z-index: 300; pointer-events: none; animation: confettiFall linear forwards; }
+  @keyframes confettiFall { to { transform: translateY(105vh) rotate(720deg); opacity: .4; } }
+
+  /* ── Responsive ── */
+  @media (max-width: 860px) {
+    .shell { grid-template-columns: 1fr; }
+    .mobile-bar { display: flex; }
+    .sidebar { position: fixed; top: 0; left: 0; width: 230px; height: 100vh; transform: translateX(-100%); transition: transform .25s ease; }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar.open ~ .scrim, .scrim.show { display: block; }
+    .main { padding: 20px 16px; }
+    .two-col { grid-template-columns: 1fr; }
+    .engine-page { max-width: 100%; }
+    .auth-box { width: 100%; padding: 32px 22px; }
+  }
+  @media (max-width: 520px) {
+    .cards { grid-template-columns: 1fr 1fr; gap: 10px; }
+    .card-value { font-size: 20px; }
+    .page-title { font-size: 20px; }
+    .tbl { font-size: 11px; }
+    .tbl th, .tbl td { padding: 7px 6px; }
+  }
 `;
 
 const Toast = ({ msg }) => <div className="toast">{msg}</div>;
+
+// Animated count-up for numeric cards. `format` turns the running value into display text.
+function CountUp({ value = 0, format = (v) => Math.round(v).toLocaleString(), duration = 700 }) {
+  const [display, setDisplay] = useState(0);
+  useEffect(() => {
+    let raf, start;
+    const from = 0, to = Number(value) || 0;
+    const step = (ts) => {
+      if (!start) start = ts;
+      const p = Math.min((ts - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
+      setDisplay(from + (to - from) * eased);
+      if (p < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [value, duration]);
+  return <>{format(display)}</>;
+}
+
+const Skeleton = ({ w = "100%", h = 12, style }) => <div className="skel" style={{ width: w, height: h, ...style }} />;
+
+function Modal({ title, onClose, children }) {
+  useEffect(() => {
+    const esc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+  return (
+    <div className="modal-scrim" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">{title}<button className="modal-close" onClick={onClose} aria-label="Close">✕</button></div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Fires a burst of confetti pieces from the top of the viewport.
+function fireConfetti() {
+  const colors = ["#c8f03a", "#22c55e", "#f59e0b", "#6366f1", "#ec4899"];
+  for (let i = 0; i < 80; i++) {
+    const el = document.createElement("div");
+    el.className = "confetti";
+    el.style.left = Math.random() * 100 + "vw";
+    el.style.background = colors[i % colors.length];
+    el.style.animationDuration = 2 + Math.random() * 1.5 + "s";
+    el.style.animationDelay = Math.random() * 0.3 + "s";
+    if (Math.random() > 0.5) el.style.borderRadius = "50%";
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+}
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 function AuthPage({ onLogin }) {
@@ -165,7 +311,7 @@ function AuthPage({ onLogin }) {
       const { access_token } = await r.json();
       const user = await api.get("/auth/me", access_token);
       onLogin(access_token, user);
-    } catch (e) { setErr(e?.detail || "Something went wrong."); }
+    } catch (e) { setErr(parseErr(e)); }
     finally { setLoading(false); }
   };
   return (
@@ -217,6 +363,19 @@ function Dashboard({ token, user }) {
   const catMap = {};
   txns.filter(t => t.type === "expense").forEach(t => { catMap[t.category] = (catMap[t.category] || 0) + t.amount; });
   const catData = Object.entries(catMap).map(([name, value]) => ({ name, value: Math.round(value) })).sort((a, b) => b.value - a.value).slice(0, 6);
+
+  // ── Smart Insights: derive the most useful callouts from data we already have ──
+  const savingsRate = income > 0 ? ((income - expenses) / income) * 100 : null;
+  const topCat = catData[0];
+  const insights = [];
+  if (expenses > income && income > 0) insights.push({ tone: "danger", icon: "🚨", text: `You're spending ${fmt(expenses - income)} more than you earn — review your largest categories.` });
+  if (savingsRate !== null && savingsRate >= 30) insights.push({ tone: "good", icon: "🌟", text: `Strong ${savingsRate.toFixed(0)}% savings rate — you're building wealth steadily.` });
+  else if (savingsRate !== null && savingsRate >= 0 && savingsRate < 10) insights.push({ tone: "warn", icon: "⚠️", text: `Savings rate is only ${savingsRate.toFixed(0)}%. Aim for 20%+ to stay resilient.` });
+  if (stressVal !== null && stressVal >= 66) insights.push({ tone: "danger", icon: "📉", text: `Financial stress is high (${stressVal}/100). ${stress?.verdict || ""}` });
+  else if (stressVal !== null && stressVal < 33) insights.push({ tone: "good", icon: "😌", text: `Low financial stress (${stressVal}/100) — things look calm.` });
+  if (topCat) insights.push({ tone: "warn", icon: "🏷️", text: `"${topCat.name}" is your biggest expense at ${fmt(topCat.value)}.` });
+  (stress?.alerts || []).forEach(a => insights.push({ tone: "warn", icon: "💡", text: a }));
+
   return (
     <>
       <div className="page-head">
@@ -224,12 +383,20 @@ function Dashboard({ token, user }) {
         <div className="page-subtitle">Welcome back, {user.name} · {new Date().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}</div>
       </div>
       <div className="cards">
-        <div className="card"><div className="card-label">Monthly Income</div><div className="card-value">{fmt(user.monthly_income)}</div><div className="card-sub">Base salary</div></div>
-        <div className="card"><div className="card-label">Total Income</div><div className="card-value good">{fmt(income)}</div><div className="card-sub">All recorded</div></div>
-        <div className="card"><div className="card-label">Total Expenses</div><div className="card-value danger">{fmt(expenses)}</div><div className="card-sub">All recorded</div></div>
-        <div className="card"><div className="card-label">Net Savings</div><div className={`card-value ${income - expenses >= 0 ? "good" : "danger"}`}>{fmt(income - expenses)}</div></div>
-        <div className="card"><div className="card-label">Stress Index</div><div className="card-value" style={{ color: stressColor }}>{stressLoading ? "..." : stressVal !== null ? `${stressVal}/100` : "—"}</div><div className="card-sub">{stress?.verdict || (stressLoading ? "Loading..." : "No data yet")}</div></div>
+        <div className="card"><div className="card-label">Monthly Income</div><div className="card-value"><CountUp value={user.monthly_income} format={fmt} /></div><div className="card-sub">Base salary</div></div>
+        <div className="card"><div className="card-label">Total Income</div><div className="card-value good"><CountUp value={income} format={fmt} /></div><div className="card-sub">All recorded</div></div>
+        <div className="card"><div className="card-label">Total Expenses</div><div className="card-value danger"><CountUp value={expenses} format={fmt} /></div><div className="card-sub">All recorded</div></div>
+        <div className="card"><div className="card-label">Net Savings</div><div className={`card-value ${income - expenses >= 0 ? "good" : "danger"}`}><CountUp value={income - expenses} format={fmt} /></div>{savingsRate !== null && <div className="card-sub">{savingsRate.toFixed(0)}% savings rate</div>}</div>
+        <div className="card"><div className="card-label">Stress Index</div><div className="card-value" style={{ color: stressColor }}>{stressLoading ? <Skeleton w="60%" h={22} style={{ marginTop: 4 }} /> : stressVal !== null ? `${stressVal}/100` : "—"}</div><div className="card-sub">{stress?.verdict || (stressLoading ? "Loading..." : "No data yet")}</div></div>
       </div>
+      {insights.length > 0 && (
+        <div className="section">
+          <div className="section-title">🧠 Smart Insights <span className="section-title-tag">auto-generated</span></div>
+          {insights.slice(0, 5).map((ins, i) => (
+            <div key={i} className={`alert-box alert-${ins.tone}`}>{ins.icon} {ins.text}</div>
+          ))}
+        </div>
+      )}
       {chartData.length > 0 && (
         <div className="two-col">
           <div className="section" style={{ marginBottom: 0 }}>
@@ -298,6 +465,9 @@ function Transactions({ token, toast }) {
   const [txns, setTxns] = useState([]);
   const [form, setForm] = useState({ amount: "", type: "expense", description: "", date: "" });
   const [loading, setLoading] = useState(false);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("all"); // all | income | expense
+  const [editing, setEditing] = useState(null); // transaction being edited
   const load = useCallback(() => api.get("/transactions/?limit=100", token).then(setTxns).catch(() => {}), [token]);
   useEffect(() => { load(); }, [load]);
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
@@ -305,18 +475,28 @@ function Transactions({ token, toast }) {
     if (!form.amount || !form.description) return;
     setLoading(true);
     try { await api.post("/transactions/", { ...form, amount: parseFloat(form.amount), date: form.date || new Date().toISOString() }, token); setForm({ amount: "", type: "expense", description: "", date: "" }); load(); toast("Transaction added ✓"); }
-    catch { toast("Failed"); } finally { setLoading(false); }
+    catch (e) { toast(parseErr(e)); } finally { setLoading(false); }
   };
-  const del = async (id) => { await api.del(`/transactions/${id}`, token); load(); toast("Deleted"); };
+  const saveEdit = async () => {
+    try {
+      await api.put(`/transactions/${editing.id}`, { description: editing.description, amount: parseFloat(editing.amount), type: editing.type, date: editing.date || new Date().toISOString() }, token);
+      setEditing(null); load(); toast("Transaction updated ✓");
+    } catch (e) { toast(parseErr(e)); }
+  };
+  const del = async (id) => { try { await api.del(`/transactions/${id}`, token); load(); toast("Deleted"); } catch (e) { toast(parseErr(e)); } };
   const income = txns.filter(t => t.type === "income").reduce((a, t) => a + t.amount, 0);
   const expense = txns.filter(t => t.type === "expense").reduce((a, t) => a + t.amount, 0);
+
+  const visible = txns.filter(t => (filter === "all" || t.type === filter) &&
+    (query === "" || `${t.description} ${t.category}`.toLowerCase().includes(query.toLowerCase())));
+
   return (
     <>
       <div className="page-head"><div className="page-title">Transactions</div><div className="page-subtitle">Manage your income and expenses</div></div>
       <div className="cards">
-        <div className="card"><div className="card-label">Total Income</div><div className="card-value good">{fmt(income)}</div></div>
-        <div className="card"><div className="card-label">Total Expenses</div><div className="card-value danger">{fmt(expense)}</div></div>
-        <div className="card"><div className="card-label">Net</div><div className={`card-value ${income - expense >= 0 ? "good" : "danger"}`}>{fmt(income - expense)}</div></div>
+        <div className="card"><div className="card-label">Total Income</div><div className="card-value good"><CountUp value={income} format={fmt} /></div></div>
+        <div className="card"><div className="card-label">Total Expenses</div><div className="card-value danger"><CountUp value={expense} format={fmt} /></div></div>
+        <div className="card"><div className="card-label">Net</div><div className={`card-value ${income - expense >= 0 ? "good" : "danger"}`}><CountUp value={income - expense} format={fmt} /></div></div>
         <div className="card"><div className="card-label">Entries</div><div className="card-value">{txns.length}</div></div>
       </div>
       <div className="section">
@@ -330,22 +510,46 @@ function Transactions({ token, toast }) {
         <button className="btn-add" onClick={add} disabled={loading}>{loading ? "Adding..." : "+ Add"}</button>
       </div>
       <div className="section">
-        <div className="section-title">All Transactions <span className="section-title-tag">{txns.length} entries</span></div>
-        {txns.length === 0 ? <div className="empty">No transactions yet.</div> : (
+        <div className="section-title">All Transactions <span className="section-title-tag">{visible.length} of {txns.length}</span></div>
+        <div className="filter-bar">
+          <input className="search-input" value={query} onChange={e => setQuery(e.target.value)} placeholder="🔍 Search description or category..." />
+          <div className="chip-group">
+            {["all", "income", "expense"].map(f => (
+              <button key={f} className={`chip ${filter === f ? "active" : ""}`} onClick={() => setFilter(f)} style={{ textTransform: "capitalize" }}>{f}</button>
+            ))}
+          </div>
+        </div>
+        {visible.length === 0 ? <div className="empty">{txns.length === 0 ? "No transactions yet." : "No matches for this search/filter."}</div> : (
           <table className="tbl">
             <thead><tr><th>Description</th><th>Type</th><th>Category</th><th>Amount</th><th>Date</th><th></th></tr></thead>
-            <tbody>{txns.map(t => (
+            <tbody>{visible.map(t => (
               <tr key={t.id}>
                 <td>{t.description}</td><td><span className={`badge badge-${t.type}`}>{t.type}</span></td>
                 <td><span className="badge badge-cat">{t.category}</span></td>
                 <td style={{ fontFamily: "Syne", fontWeight: 700 }}>{fmt(t.amount)}</td>
                 <td style={{ color: "var(--muted)", fontSize: 11 }}>{t.date ? new Date(t.date).toLocaleDateString("en-IN") : "—"}</td>
-                <td><button className="btn-del" onClick={() => del(t.id)}>✕</button></td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  <button className="btn-edit" onClick={() => setEditing({ ...t, date: t.date ? t.date.slice(0, 10) : "" })} aria-label="Edit transaction" title="Edit">✎</button>
+                  <button className="btn-del" onClick={() => del(t.id)} aria-label="Delete transaction" title="Delete">✕</button>
+                </td>
               </tr>
             ))}</tbody>
           </table>
         )}
       </div>
+
+      {editing && (
+        <Modal title="Edit Transaction" onClose={() => setEditing(null)}>
+          <div className="field"><label>Description</label><input value={editing.description} onChange={e => setEditing(x => ({ ...x, description: e.target.value }))} /></div>
+          <div className="field"><label>Amount (₹)</label><input type="number" value={editing.amount} onChange={e => setEditing(x => ({ ...x, amount: e.target.value }))} /></div>
+          <div className="field"><label>Type</label><select value={editing.type} onChange={e => setEditing(x => ({ ...x, type: e.target.value }))}><option value="expense">Expense</option><option value="income">Income</option></select></div>
+          <div className="field"><label>Date</label><input type="date" value={editing.date} onChange={e => setEditing(x => ({ ...x, date: e.target.value }))} /></div>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setEditing(null)}>Cancel</button>
+            <button className="btn-solid" onClick={saveEdit}>Save Changes</button>
+          </div>
+        </Modal>
+      )}
     </>
   );
 }
@@ -354,16 +558,23 @@ function Transactions({ token, toast }) {
 function Loans({ token, toast }) {
   const [loans, setLoans] = useState([]);
   const [form, setForm] = useState({ name: "", principal: "", outstanding: "", interest_rate: "", monthly_emi: "", tenure_months_remaining: "" });
+  const [editing, setEditing] = useState(null);
   const load = useCallback(() => api.get("/loans/", token).then(setLoans).catch(() => {}), [token]);
   useEffect(() => { load(); }, [load]);
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const payload = (o) => ({ name: o.name, principal: parseFloat(o.principal), outstanding: parseFloat(o.outstanding), interest_rate: parseFloat(o.interest_rate), monthly_emi: parseFloat(o.monthly_emi), tenure_months_remaining: parseInt(o.tenure_months_remaining) });
   const add = async () => {
-    try { await api.post("/loans/", { name: form.name, principal: parseFloat(form.principal), outstanding: parseFloat(form.outstanding), interest_rate: parseFloat(form.interest_rate), monthly_emi: parseFloat(form.monthly_emi), tenure_months_remaining: parseInt(form.tenure_months_remaining) }, token); setForm({ name: "", principal: "", outstanding: "", interest_rate: "", monthly_emi: "", tenure_months_remaining: "" }); load(); toast("Loan added ✓"); }
-    catch { toast("Failed"); }
+    try { await api.post("/loans/", payload(form), token); setForm({ name: "", principal: "", outstanding: "", interest_rate: "", monthly_emi: "", tenure_months_remaining: "" }); load(); toast("Loan added ✓"); }
+    catch (e) { toast(parseErr(e)); }
   };
-  const del = async (id) => { await api.del(`/loans/${id}`, token); load(); toast("Deleted"); };
+  const saveEdit = async () => {
+    try { await api.put(`/loans/${editing.id}`, payload(editing), token); setEditing(null); load(); toast("Loan updated ✓"); }
+    catch (e) { toast(parseErr(e)); }
+  };
+  const del = async (id) => { try { await api.del(`/loans/${id}`, token); load(); toast("Deleted"); } catch (e) { toast(parseErr(e)); } };
   const totalEMI = loans.reduce((a, l) => a + l.monthly_emi, 0);
   const totalOutstanding = loans.reduce((a, l) => a + l.outstanding, 0);
+  const eset = (k) => (e) => setEditing(x => ({ ...x, [k]: e.target.value }));
   return (
     <>
       <div className="page-head"><div className="page-title">Loans & EMIs</div><div className="page-subtitle">Track all your loan obligations</div></div>
@@ -398,12 +609,34 @@ function Loans({ token, toast }) {
                   <td>{l.interest_rate}%</td><td style={{ fontFamily: "Syne", fontWeight: 700 }}>{fmt(l.monthly_emi)}</td>
                   <td>{l.tenure_months_remaining} mo</td>
                   <td><div style={{ display: "flex", alignItems: "center", gap: 6 }}><div className="prog-wrap" style={{ flex: 1, minWidth: 50 }}><div className="prog-bar" style={{ width: `${paid}%`, background: "var(--good)" }} /></div><span style={{ fontSize: 10, color: "var(--muted)" }}>{paid.toFixed(0)}%</span></div></td>
-                  <td><button className="btn-del" onClick={() => del(l.id)}>✕</button></td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <button className="btn-edit" onClick={() => setEditing({ ...l })} aria-label="Edit loan" title="Edit">✎</button>
+                    <button className="btn-del" onClick={() => del(l.id)} aria-label="Delete loan" title="Delete">✕</button>
+                  </td>
                 </tr>
               );
             })}</tbody>
           </table>
         </div>
+      )}
+
+      {editing && (
+        <Modal title="Edit Loan" onClose={() => setEditing(null)}>
+          <div className="field"><label>Name</label><input value={editing.name} onChange={eset("name")} /></div>
+          <div className="form-row">
+            <div className="field"><label>Principal (₹)</label><input type="number" value={editing.principal} onChange={eset("principal")} /></div>
+            <div className="field"><label>Outstanding (₹)</label><input type="number" value={editing.outstanding} onChange={eset("outstanding")} /></div>
+          </div>
+          <div className="form-row">
+            <div className="field"><label>Interest Rate (%)</label><input type="number" value={editing.interest_rate} onChange={eset("interest_rate")} /></div>
+            <div className="field"><label>Monthly EMI (₹)</label><input type="number" value={editing.monthly_emi} onChange={eset("monthly_emi")} /></div>
+          </div>
+          <div className="field"><label>Months Remaining</label><input type="number" value={editing.tenure_months_remaining} onChange={eset("tenure_months_remaining")} /></div>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setEditing(null)}>Cancel</button>
+            <button className="btn-solid" onClick={saveEdit}>Save Changes</button>
+          </div>
+        </Modal>
       )}
     </>
   );
@@ -413,14 +646,27 @@ function Loans({ token, toast }) {
 function Goals({ token, toast }) {
   const [goals, setGoals] = useState([]);
   const [form, setForm] = useState({ name: "", target_amount: "", current_amount: "", monthly_contribution: "", deadline_months: "" });
+  const [contributing, setContributing] = useState(null); // { goal, amount }
   const load = useCallback(() => api.get("/goals/", token).then(setGoals).catch(() => {}), [token]);
   useEffect(() => { load(); }, [load]);
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
   const add = async () => {
     try { await api.post("/goals/", { name: form.name, target_amount: parseFloat(form.target_amount), current_amount: parseFloat(form.current_amount) || 0, monthly_contribution: parseFloat(form.monthly_contribution), deadline_months: parseInt(form.deadline_months) }, token); setForm({ name: "", target_amount: "", current_amount: "", monthly_contribution: "", deadline_months: "" }); load(); toast("Goal added ✓"); }
-    catch { toast("Failed"); }
+    catch (e) { toast(parseErr(e)); }
   };
-  const del = async (id) => { await api.del(`/goals/${id}`, token); load(); toast("Deleted"); };
+  const contribute = async () => {
+    const amt = parseFloat(contributing.amount);
+    if (!amt || amt <= 0) return toast("Enter a valid amount");
+    const g = contributing.goal;
+    try {
+      const updated = await api.put(`/goals/${g.id}/contribute?amount=${amt}`, {}, token);
+      const reached = updated.current_amount >= g.target_amount && g.current_amount < g.target_amount;
+      setContributing(null); load();
+      if (reached) { fireConfetti(); toast(`🎉 Goal "${g.name}" complete!`); }
+      else toast(`Added ${fmt(amt)} to ${g.name} ✓`);
+    } catch (e) { toast(parseErr(e)); }
+  };
+  const del = async (id) => { try { await api.del(`/goals/${id}`, token); load(); toast("Deleted"); } catch (e) { toast(parseErr(e)); } };
   return (
     <>
       <div className="page-head"><div className="page-title">Financial Goals</div><div className="page-subtitle">Track progress toward your targets</div></div>
@@ -454,13 +700,31 @@ function Goals({ token, toast }) {
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--muted)", margin: "5px 0 10px" }}>
                 <span>{fmt(g.current_amount)}</span><span>{fmt(g.target_amount)}</span>
               </div>
-              <div style={{ fontSize: 11, color: "var(--muted)", borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-                +{fmt(g.monthly_contribution)}/mo · ~{monthsLeft} months to go
+              <div style={{ fontSize: 11, color: "var(--muted)", borderTop: "1px solid var(--border)", paddingTop: 8, marginBottom: 10 }}>
+                {pct >= 100 ? "🎉 Goal reached!" : `+${fmt(g.monthly_contribution)}/mo · ~${monthsLeft} months to go`}
               </div>
+              <button className="btn-add" style={{ width: "100%" }} onClick={() => setContributing({ goal: g, amount: g.monthly_contribution || "" })} disabled={pct >= 100}>
+                {pct >= 100 ? "✓ Completed" : "+ Add Contribution"}
+              </button>
             </div>
           );
         })}
       </div>
+
+      {contributing && (
+        <Modal title={`Contribute to "${contributing.goal.name}"`} onClose={() => setContributing(null)}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>
+            Currently {fmt(contributing.goal.current_amount)} of {fmt(contributing.goal.target_amount)} saved.
+          </div>
+          <div className="field"><label>Amount to add (₹)</label>
+            <input type="number" autoFocus value={contributing.amount} onChange={e => setContributing(x => ({ ...x, amount: e.target.value }))} placeholder="15000" />
+          </div>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={() => setContributing(null)}>Cancel</button>
+            <button className="btn-solid" onClick={contribute}>Add Contribution</button>
+          </div>
+        </Modal>
+      )}
     </>
   );
 }
@@ -1042,9 +1306,28 @@ export default function App() {
   const [user, setUser] = useState(() => { try { return JSON.parse(localStorage.getItem("zf_user")); } catch { return null; } });
   const [page, setPage] = useState("dashboard");
   const [toastMsg, setToastMsg] = useState(null);
+  const [theme, setTheme] = useState(() => localStorage.getItem("zf_theme") || "light");
+  const [navOpen, setNavOpen] = useState(false);
   const toast = (msg) => { setToastMsg(msg); setTimeout(() => setToastMsg(null), 2500); };
   const onLogin = (t, u) => { localStorage.setItem("zf_token", t); localStorage.setItem("zf_user", JSON.stringify(u)); setToken(t); setUser(u); };
-  const logout = () => { localStorage.removeItem("zf_token"); localStorage.removeItem("zf_user"); setToken(null); setUser(null); };
+  const logout = useCallback(() => { localStorage.removeItem("zf_token"); localStorage.removeItem("zf_user"); setToken(null); setUser(null); }, []);
+
+  // Apply theme to the document root and persist it.
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("zf_theme", theme);
+  }, [theme]);
+  const toggleTheme = () => setTheme(t => t === "light" ? "dark" : "light");
+
+  // Auto-logout when any API call reports an expired/invalid session (401).
+  useEffect(() => {
+    const onUnauth = () => { logout(); toast("Session expired — please sign in again."); };
+    window.addEventListener("zf-unauthorized", onUnauth);
+    return () => window.removeEventListener("zf-unauthorized", onUnauth);
+  }, [logout]);
+
+  // Close the mobile drawer whenever the page changes.
+  const go = (id) => { setPage(id); setNavOpen(false); };
 
   const navItems = [
     { section: "Overview" },
@@ -1077,29 +1360,40 @@ export default function App() {
     debt: <DebtOptimizer token={token} toast={toast} />,
   };
 
+  const currentLabel = navItems.find(n => n.id === page)?.label || "Dashboard";
+
   return (
     <>
       <style>{styles}</style>
+      <div className="mobile-bar">
+        <button className="hamburger" onClick={() => setNavOpen(true)} aria-label="Open menu">☰</button>
+        <div className="m-logo">ZENITH <span>FIN</span></div>
+        <button className="hamburger" onClick={toggleTheme} aria-label="Toggle theme">{theme === "light" ? "🌙" : "☀️"}</button>
+      </div>
       <div className="shell">
-        <aside className="sidebar">
+        <aside className={`sidebar ${navOpen ? "open" : ""}`}>
           <div className="sidebar-logo">ZENITH <span>FIN</span></div>
           <nav className="nav">
             {navItems.map((n, i) => n.section
               ? <div key={i} className="nav-section">{n.section}</div>
-              : <button key={n.id} className={`nav-item ${page === n.id ? "active" : ""}`} onClick={() => setPage(n.id)}>
+              : <button key={n.id} className={`nav-item ${page === n.id ? "active" : ""}`} onClick={() => go(n.id)}>
                   <span className="nav-icon">{n.icon}</span>{n.label}
                 </button>
             )}
           </nav>
           <div className="sidebar-footer">
+            <button className="theme-toggle" onClick={toggleTheme}>
+              {theme === "light" ? "🌙 Dark mode" : "☀️ Light mode"}
+            </button>
             <div className="user-pill">
-              <div className="user-avatar">{user.name[0].toUpperCase()}</div>
+              <div className="user-avatar">{(user.name?.[0] || "?").toUpperCase()}</div>
               <div className="user-name">{user.name}</div>
-              <button className="logout-btn" onClick={logout} title="Sign out">⏻</button>
+              <button className="logout-btn" onClick={logout} title="Sign out" aria-label="Sign out">⏻</button>
             </div>
           </div>
         </aside>
-        <main className="main">{pages[page]}</main>
+        {navOpen && <div className="scrim show" onClick={() => setNavOpen(false)} />}
+        <main className="main" aria-label={currentLabel}>{pages[page]}</main>
       </div>
       {toastMsg && <Toast msg={toastMsg} />}
     </>
