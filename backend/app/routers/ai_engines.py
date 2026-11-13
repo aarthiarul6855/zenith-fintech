@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from typing import Optional, List as PyList
 from pydantic import BaseModel                    # ← add this
 from app.database import get_db
 from app.models.models import User, Transaction, Loan, Goal
+from app.services.limiter import limiter
+from app.services import chat_agent
 from app.schemas.schemas import (
     AllocationRequest, SimulationRequest, DebtOptimizationRequest, GoalPredictionRequest
 )
@@ -163,6 +165,33 @@ def debt_optimization_endpoint(
     monthly_surplus = user.monthly_income - avg_monthly_expenses
 
     return debt_optimizer.run(loans, monthly_surplus, payload.strategy)
+
+# ── Ask Zenith: conversational assistant over the user's data ─────────────────
+
+class AskRequest(BaseModel):
+    question: str
+
+
+@router.get("/ask/status")
+def ask_status():
+    """Whether the AI assistant is configured (a Groq key is set)."""
+    return {"configured": chat_agent.is_configured()}
+
+
+@router.post("/ask")
+@limiter.limit("20/minute")
+def ask_zenith(
+    payload: AskRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Answer a natural-language question using the engines as tools."""
+    q = (payload.question or "").strip()
+    if not q:
+        raise HTTPException(400, "Ask a question.")
+    return chat_agent.run_chat(q, db, user)
+
 
 # ── Engine 8: Cash-Flow Forecaster ────────────────────────────────────────────
 

@@ -1,3 +1,11 @@
+# Use the OS trust store for outbound TLS (e.g. the Groq API) so development behind a
+# corporate/antivirus TLS proxy works. Safe no-op in a standard production environment.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler

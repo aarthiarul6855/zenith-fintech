@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, CartesianGrid, Legend, RadialBarChart, RadialBar,
@@ -242,6 +242,27 @@ const styles = `
   .chip-group { display: flex; gap: 6px; }
   .chip { padding: 8px 14px; border: 1.5px solid var(--border); border-radius: 6px; background: transparent; color: var(--muted); font-family: 'DM Mono', monospace; font-size: 11px; cursor: pointer; transition: all .15s; }
   .chip.active { background: var(--ink); color: var(--accent); border-color: var(--ink); }
+
+  /* ── Chat (Ask Zenith) ── */
+  .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 160px); min-height: 420px; }
+  .chat-log { flex: 1; overflow-y: auto; padding: 4px 2px 12px; display: flex; flex-direction: column; gap: 12px; }
+  .bubble { max-width: 76%; padding: 11px 14px; border-radius: 12px; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-wrap: break-word; }
+  .bubble.user { align-self: flex-end; background: var(--ink); color: var(--accent); border-bottom-right-radius: 3px; }
+  .bubble.bot { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+  .bubble-tools { margin-top: 7px; display: flex; gap: 5px; flex-wrap: wrap; }
+  .tool-tag { font-size: 9px; text-transform: uppercase; letter-spacing: .05em; padding: 2px 7px; border-radius: 20px; background: rgba(200,240,58,.14); color: #5a6e00; border: 1px solid rgba(200,240,58,.3); }
+  :root[data-theme="dark"] .tool-tag { color: var(--accent); }
+  .chat-input-row { display: flex; gap: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .chat-input { flex: 1; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: 8px; background: var(--paper); color: var(--fg); font-family: 'DM Mono', monospace; font-size: 13px; outline: none; resize: none; }
+  .chat-input:focus { border-color: var(--fg); }
+  .chat-send { padding: 0 20px; background: var(--ink); color: var(--accent); border: none; border-radius: 8px; font-family: 'Syne', sans-serif; font-weight: 700; font-size: 13px; cursor: pointer; }
+  .chat-send:disabled { opacity: .4; cursor: not-allowed; }
+  .chat-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chat-chip { padding: 7px 13px; border: 1px solid var(--border); border-radius: 20px; background: transparent; color: var(--muted); font-family: 'DM Mono', monospace; font-size: 11px; cursor: pointer; transition: all .15s; }
+  .chat-chip:hover { border-color: var(--fg); color: var(--fg); }
+  .typing span { display: inline-block; width: 6px; height: 6px; margin: 0 1px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
+  .typing span:nth-child(2) { animation-delay: .2s; } .typing span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
 
   /* ── Confetti ── */
   .confetti { position: fixed; top: -12px; width: 9px; height: 9px; z-index: 300; pointer-events: none; animation: confettiFall linear forwards; }
@@ -1594,6 +1615,79 @@ function TwoFactorCard({ token, toast }) {
   );
 }
 
+// ── Ask Zenith (AI assistant) ─────────────────────────────────────────────────
+function AskZenith({ token }) {
+  const [configured, setConfigured] = useState(null);
+  const [messages, setMessages] = useState([
+    { role: "bot", content: "Hi! I'm Zenith. Ask me anything about your finances — I'll use your real data and run the right engine to answer." },
+  ]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const logRef = useRef(null);
+  const suggestions = [
+    "How's my financial health?",
+    "Can I afford a ₹50,000 trip in March?",
+    "Where is my money leaking?",
+    "What's my cash flow look like for 6 months?",
+  ];
+
+  useEffect(() => { api.get("/ai/ask/status", token).then(r => setConfigured(r.configured)).catch(() => setConfigured(false)); }, [token]);
+  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [messages, busy]);
+
+  const ask = async (q) => {
+    const question = (q ?? input).trim();
+    if (!question || busy) return;
+    setInput("");
+    setMessages(m => [...m, { role: "user", content: question }]);
+    setBusy(true);
+    try {
+      const r = await api.post("/ai/ask", { question }, token);
+      setMessages(m => [...m, { role: "bot", content: r.answer, tools: r.tools_used || [] }]);
+      if (r.configured === false) setConfigured(false);
+    } catch (e) {
+      setMessages(m => [...m, { role: "bot", content: "⚠️ " + parseErr(e) }]);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <div className="page-head">
+        <div className="page-title">Ask Zenith</div>
+        <div className="page-subtitle">Your AI financial assistant — grounded in your real data</div>
+      </div>
+      {configured === false && (
+        <div className="alert-box alert-warn" style={{ marginBottom: 14 }}>
+          ⚙️ The assistant isn't configured. Add a free <strong>GROQ_API_KEY</strong> (from console.groq.com) to the backend <code>.env</code> to enable live answers. Until then, replies will say so.
+        </div>
+      )}
+      <div className="section chat-wrap">
+        <div className="chat-log" ref={logRef}>
+          {messages.map((m, i) => (
+            <div key={i} className={`bubble ${m.role}`}>
+              {m.content}
+              {m.tools?.length > 0 && (
+                <div className="bubble-tools">{[...new Set(m.tools)].map(t => <span key={t} className="tool-tag">{t.replace(/_/g, " ")}</span>)}</div>
+              )}
+            </div>
+          ))}
+          {busy && <div className="bubble bot"><span className="typing"><span></span><span></span><span></span></span></div>}
+        </div>
+        {messages.length <= 1 && (
+          <div className="chat-chips">
+            {suggestions.map(s => <button key={s} className="chat-chip" onClick={() => ask(s)}>{s}</button>)}
+          </div>
+        )}
+        <div className="chat-input-row">
+          <textarea className="chat-input" rows={1} value={input} onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } }}
+            placeholder="Ask about your money..." />
+          <button className="chat-send" onClick={() => ask()} disabled={busy || !input.trim()}>{busy ? "..." : "Send"}</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ── Security & Activity ───────────────────────────────────────────────────────
 function SecurityActivity({ token, toast }) {
   const [rows, setRows] = useState(null);
@@ -1701,6 +1795,7 @@ export default function App() {
     { id: "loans", icon: "◈", label: "Loans & EMIs" },
     { id: "goals", icon: "◎", label: "Goals" },
     { section: "AI Engines" },
+    { id: "ask", icon: "💬", label: "Ask Zenith" },
     { id: "salary", icon: "💰", label: "Salary Allocation" },
     { id: "stress", icon: "📊", label: "Stress Index" },
     { id: "whatif", icon: "🔮", label: "What-If Simulation" },
@@ -1719,6 +1814,7 @@ export default function App() {
     transactions: <Transactions token={token} toast={toast} />,
     loans: <Loans token={token} toast={toast} />,
     goals: <Goals token={token} toast={toast} />,
+    ask: <AskZenith token={token} />,
     salary: <SalaryAllocation token={token} toast={toast} />,
     stress: <StressIndex token={token} toast={toast} />,
     whatif: <WhatIfSim token={token} toast={toast} />,
