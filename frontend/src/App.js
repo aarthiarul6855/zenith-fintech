@@ -47,6 +47,13 @@ const api = {
     await handle(await fetch(`${API}${path}`, { method: "DELETE", headers: api.headers(token) }));
     return true;
   },
+  // Multipart file upload — no Content-Type header (the browser sets the boundary).
+  upload: async (path, file, token) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await handle(await fetch(`${API}${path}`, { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd }));
+    return r.json();
+  },
 };
 
 const fmt = (n) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(n || 0);
@@ -468,6 +475,10 @@ function Transactions({ token, toast }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all"); // all | income | expense
   const [editing, setEditing] = useState(null); // transaction being edited
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importResult, setImportResult] = useState(null);
   const load = useCallback(() => api.get("/transactions/?limit=100", token).then(setTxns).catch(() => {}), [token]);
   useEffect(() => { load(); }, [load]);
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
@@ -484,6 +495,22 @@ function Transactions({ token, toast }) {
     } catch (e) { toast(parseErr(e)); }
   };
   const del = async (id) => { try { await api.del(`/transactions/${id}`, token); load(); toast("Deleted"); } catch (e) { toast(parseErr(e)); } };
+  const runImport = async () => {
+    if (!importFile) return toast("Choose a CSV file first");
+    setImportBusy(true); setImportResult(null);
+    try {
+      const res = await api.upload("/transactions/import-csv", importFile, token);
+      setImportResult(res); load();
+      toast(`Imported ${res.imported} · skipped ${res.skipped_duplicates} dupes ✓`);
+    } catch (e) { toast(parseErr(e)); } finally { setImportBusy(false); }
+  };
+  const closeImport = () => { setImportOpen(false); setImportFile(null); setImportResult(null); };
+  const downloadSample = () => {
+    const csv = "date,description,amount,type\n2026-01-05,Salary,100000,income\n2026-01-07,Swiggy order,540,expense\n2026-01-10,Electricity bill,1850,expense\n";
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a"); a.href = url; a.download = "zenith_sample.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
   const income = txns.filter(t => t.type === "income").reduce((a, t) => a + t.amount, 0);
   const expense = txns.filter(t => t.type === "expense").reduce((a, t) => a + t.amount, 0);
 
@@ -507,7 +534,10 @@ function Transactions({ token, toast }) {
           <div className="field"><label>Type</label><select value={form.type} onChange={set("type")}><option value="expense">Expense</option><option value="income">Income</option></select></div>
           <div className="field"><label>Date</label><input type="date" value={form.date} onChange={set("date")} /></div>
         </div>
-        <button className="btn-add" onClick={add} disabled={loading}>{loading ? "Adding..." : "+ Add"}</button>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button className="btn-add" onClick={add} disabled={loading}>{loading ? "Adding..." : "+ Add"}</button>
+          <button className="btn-ghost" style={{ flex: "none", padding: "9px 18px" }} onClick={() => setImportOpen(true)}>⬆ Import CSV</button>
+        </div>
       </div>
       <div className="section">
         <div className="section-title">All Transactions <span className="section-title-tag">{visible.length} of {txns.length}</span></div>
@@ -537,6 +567,29 @@ function Transactions({ token, toast }) {
           </table>
         )}
       </div>
+
+      {importOpen && (
+        <Modal title="Import Transactions from CSV" onClose={closeImport}>
+          <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginBottom: 14 }}>
+            Upload a bank statement or any CSV. We'll auto-detect columns (<code>date</code>, <code>description</code>, <code>amount</code> or <code>debit</code>/<code>credit</code>), categorize each row, and skip duplicates.
+            <button onClick={downloadSample} style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontFamily: "DM Mono", fontSize: 12, textDecoration: "underline", padding: "6px 0 0", display: "block" }}>↓ Download a sample CSV</button>
+          </div>
+          <div className="field">
+            <label>CSV file</label>
+            <input type="file" accept=".csv" onChange={e => { setImportFile(e.target.files?.[0] || null); setImportResult(null); }} />
+          </div>
+          {importFile && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Selected: {importFile.name}</div>}
+          {importResult && (
+            <div className="alert-box alert-good" style={{ marginTop: 14 }}>
+              ✅ Imported <strong>{importResult.imported}</strong> · skipped <strong>{importResult.skipped_duplicates}</strong> duplicates{importResult.errors > 0 ? <> · <strong>{importResult.errors}</strong> rows couldn't be read</> : null} (of {importResult.total_rows} rows).
+            </div>
+          )}
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={closeImport}>{importResult ? "Done" : "Cancel"}</button>
+            <button className="btn-solid" onClick={runImport} disabled={importBusy || !importFile}>{importBusy ? "Importing..." : "Import"}</button>
+          </div>
+        </Modal>
+      )}
 
       {editing && (
         <Modal title="Edit Transaction" onClose={() => setEditing(null)}>
