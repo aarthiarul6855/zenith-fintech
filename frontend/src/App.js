@@ -4,6 +4,7 @@ import {
   LineChart, Line, CartesianGrid, Legend, RadialBarChart, RadialBar,
   PieChart, Pie, Cell, AreaChart, Area, ReferenceLine
 } from "recharts";
+import { QRCodeSVG } from "qrcode.react";
 
 const API = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
@@ -17,42 +18,64 @@ const parseErr = (e) => {
   return d?.msg || d?.message || "Something went wrong.";
 };
 
-const handle = async (r) => {
-  if (r.status === 401) {
-    // Token missing/expired → notify app shell to log out.
+// Single-flight access-token refresh: on a 401 we try /auth/refresh once and retry.
+let _refreshPromise = null;
+const refreshAccess = () => {
+  const rt = (() => { try { return localStorage.getItem("zf_refresh"); } catch { return null; } })();
+  if (!rt) return Promise.resolve(null);
+  if (!_refreshPromise) {
+    _refreshPromise = fetch(`${API}/auth/refresh`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: rt }),
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error("refresh failed");
+        const d = await r.json();
+        try {
+          localStorage.setItem("zf_token", d.access_token);
+          if (d.refresh_token) localStorage.setItem("zf_refresh", d.refresh_token);
+        } catch { /* ignore storage errors */ }
+        window.dispatchEvent(new CustomEvent("zf-token-refreshed", { detail: d.access_token }));
+        return d.access_token;
+      })
+      .catch(() => null)
+      .finally(() => { _refreshPromise = null; });
+  }
+  return _refreshPromise;
+};
+
+// Central request helper. On 401 it silently refreshes once and retries before giving up.
+const call = async (path, { method = "GET", body, token, form } = {}, _retried = false) => {
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  let fetchBody;
+  if (form) fetchBody = form;                               // FormData sets its own Content-Type
+  else if (body !== undefined) { headers["Content-Type"] = "application/json"; fetchBody = JSON.stringify(body); }
+
+  const r = await fetch(`${API}${path}`, { method, headers, body: fetchBody });
+
+  if (r.status === 401 && !_retried) {
+    const newToken = await refreshAccess();
+    if (newToken) return call(path, { method, body, token: newToken, form }, true);
     window.dispatchEvent(new CustomEvent("zf-unauthorized"));
     const err = new Error("Session expired. Please sign in again.");
     err.detail = "Session expired. Please sign in again.";
     throw err;
   }
-  if (!r.ok && r.status !== 204) throw await r.json().catch(() => ({ detail: `Request failed (${r.status})` }));
-  return r;
+  if (r.status === 204) return true;
+  if (!r.ok) throw await r.json().catch(() => ({ detail: `Request failed (${r.status})` }));
+  return r.json();
 };
 
 const api = {
-  headers: (token) => ({ "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }),
-  post: async (path, body, token) => {
-    const r = await handle(await fetch(`${API}${path}`, { method: "POST", headers: api.headers(token), body: JSON.stringify(body) }));
-    return r.json();
-  },
-  put: async (path, body, token) => {
-    const r = await handle(await fetch(`${API}${path}`, { method: "PUT", headers: api.headers(token), body: JSON.stringify(body) }));
-    return r.json();
-  },
-  get: async (path, token) => {
-    const r = await handle(await fetch(`${API}${path}`, { headers: api.headers(token) }));
-    return r.json();
-  },
-  del: async (path, token) => {
-    await handle(await fetch(`${API}${path}`, { method: "DELETE", headers: api.headers(token) }));
-    return true;
-  },
+  get: (path, token) => call(path, { method: "GET", token }),
+  post: (path, body, token) => call(path, { method: "POST", body, token }),
+  put: (path, body, token) => call(path, { method: "PUT", body, token }),
+  del: (path, token) => call(path, { method: "DELETE", token }),
   // Multipart file upload — no Content-Type header (the browser sets the boundary).
-  upload: async (path, file, token) => {
+  upload: (path, file, token) => {
     const fd = new FormData();
     fd.append("file", file);
-    const r = await handle(await fetch(`${API}${path}`, { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd }));
-    return r.json();
+    return call(path, { method: "POST", form: fd, token });
   },
 };
 
@@ -306,6 +329,8 @@ function AuthPage({ onLogin }) {
   const [form, setForm] = useState({ email: "", password: "", name: "", monthly_income: "" });
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [needs2fa, setNeeds2fa] = useState(false);
+  const [totp, setTotp] = useState("");
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
     setErr(""); setLoading(true);
@@ -313,11 +338,17 @@ function AuthPage({ onLogin }) {
       if (tab === "register") await api.post("/auth/register", { email: form.email, password: form.password, name: form.name, monthly_income: parseFloat(form.monthly_income) || 0 });
       const fd = new FormData();
       fd.append("username", form.email); fd.append("password", form.password);
+      if (needs2fa && totp) fd.append("totp_code", totp);
       const r = await fetch(`${API}/auth/login`, { method: "POST", body: fd });
-      if (!r.ok) throw await r.json();
-      const { access_token } = await r.json();
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        if (body?.detail === "2FA code required") { setNeeds2fa(true); setErr(""); return; }
+        if (body?.detail === "Invalid 2FA code") { setNeeds2fa(true); throw body; }
+        throw body;
+      }
+      const { access_token, refresh_token } = await r.json();
       const user = await api.get("/auth/me", access_token);
-      onLogin(access_token, user);
+      onLogin(access_token, user, refresh_token);
     } catch (e) { setErr(parseErr(e)); }
     finally { setLoading(false); }
   };
@@ -337,7 +368,14 @@ function AuthPage({ onLogin }) {
         </>}
         <div className="field"><label>Email</label><input type="email" value={form.email} onChange={set("email")} placeholder="you@example.com" /></div>
         <div className="field"><label>Password</label><input type="password" value={form.password} onChange={set("password")} placeholder="••••••••" /></div>
-        <button className="btn-primary" onClick={submit} disabled={loading}>{loading ? <span className="spin" /> : tab === "login" ? "Sign In →" : "Create Account →"}</button>
+        {needs2fa && tab === "login" && (
+          <div className="field">
+            <label>Authenticator code</label>
+            <input value={totp} onChange={e => setTotp(e.target.value)} placeholder="6-digit or backup code" inputMode="numeric" autoFocus />
+            <span style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>🔐 This account has 2FA enabled — enter a code to continue.</span>
+          </div>
+        )}
+        <button className="btn-primary" onClick={submit} disabled={loading}>{loading ? <span className="spin" /> : tab === "login" ? (needs2fa ? "Verify & Sign In →" : "Sign In →") : "Create Account →"}</button>
       </div>
     </div>
   );
@@ -1463,6 +1501,151 @@ function CashFlowForecaster({ token, toast }) {
   );
 }
 
+// ── Two-Factor Authentication card ────────────────────────────────────────────
+function TwoFactorCard({ token, toast }) {
+  const [status, setStatus] = useState(null);
+  const [stage, setStage] = useState(null); // null | 'setup' | 'codes' | 'disable'
+  const [setupData, setSetupData] = useState(null);
+  const [code, setCode] = useState("");
+  const [backupCodes, setBackupCodes] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const loadStatus = useCallback(() => api.get("/auth/2fa/status", token).then(setStatus).catch(() => {}), [token]);
+  useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  const beginSetup = async () => {
+    setBusy(true);
+    try { const d = await api.post("/auth/2fa/setup", {}, token); setSetupData(d); setCode(""); setStage("setup"); }
+    catch (e) { toast(parseErr(e)); } finally { setBusy(false); }
+  };
+  const confirmEnable = async () => {
+    setBusy(true);
+    try {
+      const d = await api.post("/auth/2fa/verify", { code }, token);
+      setBackupCodes(d.backup_codes || []); setStage("codes"); loadStatus(); toast("2FA enabled ✓");
+    } catch (e) { toast(parseErr(e)); } finally { setBusy(false); }
+  };
+  const disable = async () => {
+    setBusy(true);
+    try { await api.post("/auth/2fa/disable", { code }, token); setStage(null); setCode(""); loadStatus(); toast("2FA disabled"); }
+    catch (e) { toast(parseErr(e)); } finally { setBusy(false); }
+  };
+  const close = () => { setStage(null); setCode(""); setSetupData(null); setBackupCodes([]); };
+  const copyCodes = () => { navigator.clipboard?.writeText(backupCodes.join("\n")); toast("Backup codes copied"); };
+  const downloadCodes = () => {
+    const url = URL.createObjectURL(new Blob([`Zenith Fintech — 2FA backup codes\n\n${backupCodes.join("\n")}\n`], { type: "text/plain" }));
+    const a = document.createElement("a"); a.href = url; a.download = "zenith_backup_codes.txt"; a.click(); URL.revokeObjectURL(url);
+  };
+
+  const enabled = status?.enabled;
+  return (
+    <div className="section">
+      <div className="section-title">Two-Factor Authentication {status && <span className="section-title-tag" style={{ color: enabled ? "var(--good)" : "var(--muted)" }}>{enabled ? "● Enabled" : "○ Disabled"}</span>}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, maxWidth: 480 }}>
+          {enabled
+            ? <>An authenticator code is required at sign-in. You have <strong>{status.backup_codes_remaining}</strong> backup code{status.backup_codes_remaining === 1 ? "" : "s"} left.</>
+            : "Add a second layer of security — sign-in will require a code from an authenticator app (Google Authenticator, Authy, 1Password)."}
+        </div>
+        {enabled
+          ? <button className="btn-ghost" style={{ flex: "none", padding: "9px 18px" }} onClick={() => { setCode(""); setStage("disable"); }}>Disable 2FA</button>
+          : <button className="btn-add" onClick={beginSetup} disabled={busy}>{busy ? "..." : "🔐 Enable 2FA"}</button>}
+      </div>
+
+      {stage === "setup" && setupData && (
+        <Modal title="Set up Two-Factor Auth" onClose={close}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>Scan this with your authenticator app, then enter the 6-digit code it shows.</div>
+          <div style={{ display: "grid", placeItems: "center", padding: 14, background: "#fff", borderRadius: 8, marginBottom: 12 }}>
+            <QRCodeSVG value={setupData.otpauth_uri} size={168} />
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 12, wordBreak: "break-all", textAlign: "center" }}>Manual key: <code>{setupData.secret}</code></div>
+          <div className="field"><label>6-digit code</label><input value={code} onChange={e => setCode(e.target.value)} placeholder="123456" inputMode="numeric" autoFocus /></div>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={close}>Cancel</button>
+            <button className="btn-solid" onClick={confirmEnable} disabled={busy || code.length < 6}>{busy ? "Verifying..." : "Verify & Enable"}</button>
+          </div>
+        </Modal>
+      )}
+
+      {stage === "codes" && (
+        <Modal title="Save your backup codes" onClose={() => { close(); }}>
+          <div className="alert-box alert-warn" style={{ marginBottom: 14 }}>⚠️ Store these safely. Each works once if you lose your authenticator. They won't be shown again.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontFamily: "DM Mono", fontSize: 13, marginBottom: 14 }}>
+            {backupCodes.map((c, i) => <div key={i} style={{ padding: "8px 10px", background: "var(--paper)", borderRadius: 5, textAlign: "center", letterSpacing: 1 }}>{c}</div>)}
+          </div>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={copyCodes}>Copy</button>
+            <button className="btn-ghost" onClick={downloadCodes}>Download</button>
+            <button className="btn-solid" onClick={close}>Done</button>
+          </div>
+        </Modal>
+      )}
+
+      {stage === "disable" && (
+        <Modal title="Disable Two-Factor Auth" onClose={close}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>Enter a current authenticator code (or a backup code) to confirm.</div>
+          <div className="field"><label>Code</label><input value={code} onChange={e => setCode(e.target.value)} placeholder="123456 or backup code" autoFocus /></div>
+          <div className="modal-actions">
+            <button className="btn-ghost" onClick={close}>Cancel</button>
+            <button className="btn-solid" onClick={disable} disabled={busy || !code}>{busy ? "..." : "Disable 2FA"}</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ── Security & Activity ───────────────────────────────────────────────────────
+function SecurityActivity({ token, toast }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => { api.get("/auth/activity?limit=50", token).then(setRows).catch(() => setRows([])); }, [token]);
+
+  const meta = (action) => {
+    if (action === "login_success") return { label: "Sign in", cls: "badge-income", icon: "✅" };
+    if (action === "login_failed") return { label: "Failed sign-in", cls: "badge-expense", icon: "⛔" };
+    if (action === "register") return { label: "Account created", cls: "badge-cat", icon: "🆕" };
+    return { label: action.replace(/_/g, " "), cls: "badge-cat", icon: "•" };
+  };
+  const failedCount = (rows || []).filter(r => r.action === "login_failed").length;
+  const lastLogin = (rows || []).find(r => r.action === "login_success");
+
+  return (
+    <>
+      <div className="page-head">
+        <div className="page-title">Security &amp; Activity</div>
+        <div className="page-subtitle">Recent account activity recorded on your profile</div>
+      </div>
+      <div className="cards">
+        <div className="card"><div className="card-label">Events Logged</div><div className="card-value">{rows ? rows.length : <Skeleton w="50%" h={22} />}</div><div className="card-sub">most recent 50</div></div>
+        <div className="card"><div className="card-label">Failed Sign-ins</div><div className={`card-value ${failedCount > 0 ? "warn" : "good"}`}>{rows ? failedCount : "…"}</div><div className="card-sub">in recent log</div></div>
+        <div className="card"><div className="card-label">Last Sign-in</div><div className="card-value" style={{ fontSize: 15 }}>{lastLogin ? new Date(lastLogin.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"}</div></div>
+        <div className="card"><div className="card-label">Protection</div><div className="card-value good" style={{ fontSize: 15 }}>Rate-limited</div><div className="card-sub">5 attempts / min</div></div>
+      </div>
+      <TwoFactorCard token={token} toast={toast} />
+      <div className="section">
+        <div className="section-title">Activity Log <span className="section-title-tag">newest first</span></div>
+        {!rows ? (
+          <div style={{ padding: 10 }}>{[1, 2, 3, 4].map(i => <Skeleton key={i} h={16} style={{ marginBottom: 10 }} />)}</div>
+        ) : rows.length === 0 ? <div className="empty">No activity recorded yet.</div> : (
+          <table className="tbl">
+            <thead><tr><th>Event</th><th>Detail</th><th>IP Address</th><th>When</th></tr></thead>
+            <tbody>{rows.map((r, i) => {
+              const m = meta(r.action);
+              return (
+                <tr key={i}>
+                  <td><span className={`badge ${m.cls}`}>{m.icon} {m.label}</span></td>
+                  <td>{r.detail || "—"}</td>
+                  <td style={{ fontFamily: "DM Mono", color: "var(--muted)", fontSize: 11 }}>{r.ip || "—"}</td>
+                  <td style={{ color: "var(--muted)", fontSize: 11 }}>{r.created_at ? new Date(r.created_at).toLocaleString("en-IN") : "—"}</td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ── App Root ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("zf_token"));
@@ -1472,8 +1655,19 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem("zf_theme") || "light");
   const [navOpen, setNavOpen] = useState(false);
   const toast = (msg) => { setToastMsg(msg); setTimeout(() => setToastMsg(null), 2500); };
-  const onLogin = (t, u) => { localStorage.setItem("zf_token", t); localStorage.setItem("zf_user", JSON.stringify(u)); setToken(t); setUser(u); };
-  const logout = useCallback(() => { localStorage.removeItem("zf_token"); localStorage.removeItem("zf_user"); setToken(null); setUser(null); }, []);
+  const onLogin = (t, u, refresh) => {
+    localStorage.setItem("zf_token", t);
+    localStorage.setItem("zf_user", JSON.stringify(u));
+    if (refresh) localStorage.setItem("zf_refresh", refresh);
+    setToken(t); setUser(u);
+  };
+  const logout = useCallback(() => {
+    // Revoke the refresh token server-side (fire-and-forget), then clear local state.
+    const rt = localStorage.getItem("zf_refresh");
+    if (rt) { fetch(`${API}/auth/logout`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: rt }) }).catch(() => {}); }
+    localStorage.removeItem("zf_token"); localStorage.removeItem("zf_user"); localStorage.removeItem("zf_refresh");
+    setToken(null); setUser(null);
+  }, []);
 
   // Apply theme to the document root and persist it.
   useEffect(() => {
@@ -1482,12 +1676,19 @@ export default function App() {
   }, [theme]);
   const toggleTheme = () => setTheme(t => t === "light" ? "dark" : "light");
 
-  // Auto-logout when any API call reports an expired/invalid session (401).
+  // Auto-logout only when a silent refresh also fails (401 with no recovery).
   useEffect(() => {
     const onUnauth = () => { logout(); toast("Session expired — please sign in again."); };
     window.addEventListener("zf-unauthorized", onUnauth);
     return () => window.removeEventListener("zf-unauthorized", onUnauth);
   }, [logout]);
+
+  // Keep app state in sync when a background token refresh issues a new access token.
+  useEffect(() => {
+    const onRefreshed = (e) => setToken(e.detail);
+    window.addEventListener("zf-token-refreshed", onRefreshed);
+    return () => window.removeEventListener("zf-token-refreshed", onRefreshed);
+  }, []);
 
   // Close the mobile drawer whenever the page changes.
   const go = (id) => { setPage(id); setNavOpen(false); };
@@ -1507,6 +1708,8 @@ export default function App() {
     { id: "goalprob", icon: "🎯", label: "Goal Probability" },
     { id: "inflation", icon: "📈", label: "Lifestyle Inflation" },
     { id: "debt", icon: "🏦", label: "Debt Optimizer" },
+    { section: "Account" },
+    { id: "security", icon: "🛡", label: "Security & Activity" },
   ];
 
   if (!token || !user) return (<><style>{styles}</style><AuthPage onLogin={onLogin} /></>);
@@ -1523,6 +1726,7 @@ export default function App() {
     goalprob: <GoalProbability token={token} toast={toast} />,
     inflation: <LifestyleInflation token={token} toast={toast} />,
     debt: <DebtOptimizer token={token} toast={toast} />,
+    security: <SecurityActivity token={token} toast={toast} />,
   };
 
   const currentLabel = navItems.find(n => n.id === page)?.label || "Dashboard";

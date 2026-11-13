@@ -1,8 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from app.database import Base, engine
 from app.routers import auth, transactions, ai_engines
 from app.routers.data import loans_router, goals_router
+from app.services.limiter import limiter
 
 
 # Create all tables
@@ -15,6 +18,10 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Rate limiting (slowapi): register the shared limiter and its 429 handler.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS — allow React dev server AND your live Vercel site
 app.add_middleware(
