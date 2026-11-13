@@ -6,6 +6,7 @@ from app.engines import (
     lifestyle_inflation,
     debt_optimizer,
     transaction_categorizer,
+    cash_flow_forecaster,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "lifestyle_inflation",
     "debt_optimizer",
     "transaction_categorizer",
+    "cash_flow_forecaster",
 ]

@@ -50,5 +50,6 @@ def health_check():
             "goal-probability",
             "lifestyle-inflation",
             "debt-optimization",
+            "cash-flow-forecast",
         ],
     }

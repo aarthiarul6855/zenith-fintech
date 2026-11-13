@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, CartesianGrid, Legend, RadialBarChart, RadialBar,
-  PieChart, Pie, Cell, AreaChart, Area
+  PieChart, Pie, Cell, AreaChart, Area, ReferenceLine
 } from "recharts";
 
 const API = process.env.REACT_APP_API_URL || "http://localhost:8000";
@@ -1353,6 +1353,116 @@ function DebtOptimizer({ token, toast }) {
   );
 }
 
+// ── Engine: Cash-Flow Forecaster ──────────────────────────────────────────────
+function CashFlowForecaster({ token, toast }) {
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [months, setMonths] = useState(6);
+  const run = async () => {
+    setLoading(true);
+    try { setResult(await api.get(`/ai/cash-flow-forecast?months=${months}`, token)); toast("Forecast ready ✓"); }
+    catch (e) { toast(parseErr(e)); }
+    finally { setLoading(false); }
+  };
+
+  const pm = result?.projected_months || [];
+  const chartData = pm.map(p => ({ month: p.month, balance: p.balance, range: [p.lower, p.upper] }));
+  const verdict = result?.verdict || {};
+  const verdictColor = verdict.rating === "healthy" ? "var(--good)" : verdict.rating === "at_risk" ? "var(--danger)" : "var(--warn)";
+  const verdictBox = verdict.rating === "healthy" ? "alert-good" : verdict.rating === "at_risk" ? "alert-danger" : "alert-warn";
+  const lowNegative = (result?.lowest_projected_balance ?? 0) < 0;
+
+  return (
+    <div className="engine-page">
+      <div className="engine-header">
+        <div className="engine-icon">🔮</div>
+        <div>
+          <div className="engine-title">Cash-Flow Forecaster</div>
+          <div className="engine-desc">Holt-Winters projection of your next months of cash flow &amp; running balance — built from your transaction history, with confidence bands and negative-balance alerts</div>
+        </div>
+      </div>
+      <div className="section">
+        <div className="section-title">Horizon</div>
+        <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+          {[3, 6, 12].map(m => (
+            <button key={m} className={`chip ${months === m ? "active" : ""}`} onClick={() => setMonths(m)}>{m} months</button>
+          ))}
+        </div>
+        <button className="btn-run" onClick={run} disabled={loading}>{loading ? <><span className="spin" /> Forecasting...</> : "Run Forecast →"}</button>
+      </div>
+
+      {result && (
+        <>
+          {result.limited_history && (
+            <div className="alert-box alert-warn">⚠️ Limited history ({result.months_of_history} month{result.months_of_history === 1 ? "" : "s"}) — this is a rough trend estimate. Add more transactions for a sharper forecast.</div>
+          )}
+          <div className="cards">
+            <div className="card"><div className="card-label">Projected End Balance</div><div className={`card-value ${pm.length && pm[pm.length - 1].balance >= 0 ? "good" : "danger"}`}><CountUp value={pm.length ? pm[pm.length - 1].balance : 0} format={fmt} /></div><div className="card-sub">in {result.horizon_months} months</div></div>
+            <div className="card"><div className="card-label">Lowest Point</div><div className={`card-value ${lowNegative ? "danger" : "warn"}`}>{fmt(result.lowest_projected_balance)}</div></div>
+            <div className="card"><div className="card-label">Avg Monthly Surplus</div><div className={`card-value ${(result.avg_monthly_surplus || 0) >= 0 ? "good" : "danger"}`}>{fmt(result.avg_monthly_surplus)}</div></div>
+            <div className="card"><div className="card-label">At-Risk Months</div><div className={`card-value ${(result.negative_months?.length || 0) > 0 ? "danger" : "good"}`}>{result.negative_months?.length || 0}</div></div>
+          </div>
+
+          <div className="section">
+            <div className="section-title">Projected Balance <span className="section-title-tag">{result.method}</span></div>
+            <ResponsiveContainer width="100%" height={260}>
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="cfBand" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#6366f1" stopOpacity={0.18} /><stop offset="95%" stopColor="#6366f1" stopOpacity={0.02} /></linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="month" tick={{ fontSize: 10, fontFamily: "DM Mono" }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fontFamily: "DM Mono" }} tickFormatter={v => `₹${(v / 1000).toFixed(0)}k`} axisLine={false} tickLine={false} />
+                <Tooltip formatter={(v, name) => Array.isArray(v) ? [`${fmt(v[0])} – ${fmt(v[1])}`, "P10–P90"] : [fmt(v), name]} contentStyle={{ fontFamily: "DM Mono", fontSize: 11, borderRadius: 4 }} />
+                <Legend wrapperStyle={{ fontSize: 11, fontFamily: "DM Mono" }} />
+                <ReferenceLine y={0} stroke="var(--danger)" strokeDasharray="4 3" />
+                <Area type="monotone" dataKey="range" stroke="none" fill="url(#cfBand)" name="P10–P90 range" />
+                <Area type="monotone" dataKey="balance" stroke="#6366f1" strokeWidth={2.5} fill="none" name="Expected balance" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="two-col">
+            <div className="section" style={{ marginBottom: 0 }}>
+              <div className="section-title">Monthly Projection</div>
+              <table className="tbl">
+                <thead><tr><th>Month</th><th>Income</th><th>Expenses</th><th>Net</th><th>Balance</th></tr></thead>
+                <tbody>{pm.map((p, i) => (
+                  <tr key={i}>
+                    <td>{p.month}</td>
+                    <td style={{ color: "var(--good)" }}>{fmt(p.income)}</td>
+                    <td style={{ color: "var(--danger)" }}>{fmt(p.expenses)}</td>
+                    <td style={{ fontWeight: 600, color: p.net >= 0 ? "var(--good)" : "var(--danger)" }}>{fmt(p.net)}</td>
+                    <td style={{ fontFamily: "Syne", fontWeight: 700, color: p.balance < 0 ? "var(--danger)" : "inherit" }}>{fmt(p.balance)}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <div className="section" style={{ marginBottom: 0 }}>
+              <div className="section-title">Verdict &amp; Guidance</div>
+              <div className={`alert-box ${verdictBox}`} style={{ marginBottom: 12 }}>
+                <span><strong style={{ textTransform: "capitalize", color: verdictColor }}>{(verdict.rating || "").replace("_", " ")}</strong> — {verdict.summary}</span>
+              </div>
+              {result.negative_months?.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>Projected to go negative in:</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {result.negative_months.map(m => <span key={m} className="tag" style={{ background: "#fff0f0", color: "#b91c1c", border: "1px solid #fca5a5" }}>⚠ {m}</span>)}
+                  </div>
+                </div>
+              )}
+              {result.recommendations?.map((r, i) => <div key={i} className="alert-box alert-warn">💡 {r}</div>)}
+              <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
+                Starting balance is estimated from your recorded cash flow ({fmt(result.starting_balance_estimate)}); it isn't a real account balance.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── App Root ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem("zf_token"));
@@ -1393,6 +1503,7 @@ export default function App() {
     { id: "salary", icon: "💰", label: "Salary Allocation" },
     { id: "stress", icon: "📊", label: "Stress Index" },
     { id: "whatif", icon: "🔮", label: "What-If Simulation" },
+    { id: "forecast", icon: "📡", label: "Cash-Flow Forecast" },
     { id: "goalprob", icon: "🎯", label: "Goal Probability" },
     { id: "inflation", icon: "📈", label: "Lifestyle Inflation" },
     { id: "debt", icon: "🏦", label: "Debt Optimizer" },
@@ -1408,6 +1519,7 @@ export default function App() {
     salary: <SalaryAllocation token={token} toast={toast} />,
     stress: <StressIndex token={token} toast={toast} />,
     whatif: <WhatIfSim token={token} toast={toast} />,
+    forecast: <CashFlowForecaster token={token} toast={toast} />,
     goalprob: <GoalProbability token={token} toast={toast} />,
     inflation: <LifestyleInflation token={token} toast={toast} />,
     debt: <DebtOptimizer token={token} toast={toast} />,

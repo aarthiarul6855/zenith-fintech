@@ -16,6 +16,7 @@ from app.engines import (
     lifestyle_inflation,
     debt_optimizer,
     transaction_categorizer,
+    cash_flow_forecaster,
 )
 
 
@@ -162,6 +163,26 @@ def debt_optimization_endpoint(
     monthly_surplus = user.monthly_income - avg_monthly_expenses
 
     return debt_optimizer.run(loans, monthly_surplus, payload.strategy)
+
+# ── Engine 8: Cash-Flow Forecaster ────────────────────────────────────────────
+
+@router.get("/cash-flow-forecast")
+def cash_flow_forecast_endpoint(
+    months: int = 6,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Projects the next N months (default 6) of cash flow and running balance from
+    the user's transaction history, factoring in loan EMIs, with P10/P90 confidence
+    bands and alerts for months the balance is projected to go negative.
+    """
+    transactions, loans, _ = _get_user_data(user, db)
+    if not transactions:
+        raise HTTPException(400, "No transactions yet. Add or import some to generate a forecast.")
+    total_emi = sum(l.monthly_emi for l in loans)
+    return cash_flow_forecaster.run(user.monthly_income, transactions, total_emi, months)
+
 
 # ── Engine 7: Transaction Auto-Categorizer ────────────────────────────────────
 
